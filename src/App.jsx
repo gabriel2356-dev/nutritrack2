@@ -42,19 +42,22 @@ export default function App() {
       scannerRef.current = scanner
 
       try {
-        const devices = await Html5Qrcode.getCameras()
-        if (!devices || devices.length === 0) {
-          setScanFehler("Keine Kamera gefunden.")
-          setScanInfo("")
-          return
-        }
+        // Standardmäßig Rückkamera verwenden (Mobile)
+        // (facingMode: "environment" statt "user")
+        let cameraConfig = { facingMode: "environment" }
 
-        // Back-Kamera bevorzugen (Mobile)
-        const back = devices.find((d) => /back|rear|environment/i.test(d.label))
-        const cameraId = (back || devices[0]).id
+        // Falls Browser/Device facingMode nicht unterstützt,
+        // versuchen wir als Fallback eine passende Kamera-ID zu wählen.
+        try {
+          const devices = await Html5Qrcode.getCameras()
+          if (devices && devices.length > 0) {
+            const back = devices.find((d) => /back|rear|environment/i.test(d.label))
+            if (back?.id) cameraConfig = { deviceId: { exact: back.id } }
+          }
+        } catch {}
 
         await scanner.start(
-          { deviceId: { exact: cameraId } },
+          cameraConfig,
           { fps: 10, qrbox: { width: 260, height: 160 }, aspectRatio: 1.777 },
           async (decodedText) => {
             if (cancelled) return
