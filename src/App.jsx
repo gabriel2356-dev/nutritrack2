@@ -3,6 +3,7 @@ import { supabase } from "./lib/supabase"
 import { Html5Qrcode } from "html5-qrcode"
 
 export default function App() {
+  const [seite, setSeite] = useState("vorrat") // "vorrat" | "profil"
   const [vorrat, setVorrat] = useState([])
   const [name, setName] = useState("")
   const [menge, setMenge] = useState("")
@@ -19,13 +20,45 @@ export default function App() {
   const [salz100g, setSalz100g] = useState("")
 
   const [fehler, setFehler] = useState(null)
+  const [info, setInfo] = useState("")
   const [scanOffen, setScanOffen] = useState(false)
   const [scanFehler, setScanFehler] = useState("")
   const [scanInfo, setScanInfo] = useState("")
   const scannerRef = useRef(null)
   const scannerIdRef = useRef(null)
 
+  const [profil, setProfil] = useState(() => {
+    try {
+      const raw = localStorage.getItem("nutritrack_profil")
+      return raw ? JSON.parse(raw) : {
+        name: "",
+        gewicht: "",
+        groesse: "",
+        alter: "",
+        ziel: "Muskelaufbau",
+        trainingstage: "3",
+        dislikes: "",
+      }
+    } catch {
+      return {
+        name: "",
+        gewicht: "",
+        groesse: "",
+        alter: "",
+        ziel: "Muskelaufbau",
+        trainingstage: "3",
+        dislikes: "",
+      }
+    }
+  })
+
   useEffect(() => { laden() }, [])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("nutritrack_profil", JSON.stringify(profil))
+    } catch {}
+  }, [profil])
 
   useEffect(() => {
     if (!scanOffen) return
@@ -82,6 +115,7 @@ export default function App() {
   }, [scanOffen])
 
   async function laden() {
+    setFehler(null)
     const { data, error } = await supabase
       .from("vorrat")
       .select("*")
@@ -109,6 +143,28 @@ export default function App() {
     setter(String(n))
   }
 
+  function parseQuantityToMengeEinheit(quantity) {
+    // Beispiele OFF: "450 g", "0.5 L", "330ml", "6x250ml"
+    const q = String(quantity || "").trim()
+    if (!q) return null
+
+    // 6x250ml -> wir nehmen hier 250ml als "Menge" (einfacher)
+    const multi = q.match(/(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*(g|kg|ml|l)\b/i)
+    const simple = q.match(/(\d+(?:[.,]\d+)?)\s*(g|kg|ml|l)\b/i)
+    const m = multi || simple
+    if (!m) return null
+
+    const value = toNumber(m[2] ?? m[1])
+    const unitRaw = (m[3] ?? m[2] ?? "").toLowerCase()
+    if (value === null) return null
+
+    if (unitRaw === "kg") return { menge: String(value * 1000), einheit: "g" }
+    if (unitRaw === "l") return { menge: String(value * 1000), einheit: "ml" }
+    if (unitRaw === "g") return { menge: String(value), einheit: "g" }
+    if (unitRaw === "ml") return { menge: String(value), einheit: "ml" }
+    return null
+  }
+
   async function onBarcodeFound(barcode) {
     // Mehrfach-Scans vermeiden
     await stopScanner()
@@ -128,6 +184,12 @@ export default function App() {
       const n = p.nutriments || {}
 
       if (p.product_name) setName(p.product_name)
+
+      // Menge/Einheit, falls vorhanden (fix für "Hinzufügen passiert nichts", wenn Menge leer bleibt)
+      const q = p.quantity || (p.product_quantity && p.product_quantity_unit ? `${p.product_quantity} ${p.product_quantity_unit}` : "")
+      const parsed = parseQuantityToMengeEinheit(q)
+      if (parsed?.menge) setMenge(parsed.menge)
+      if (parsed?.einheit) setEinheit(parsed.einheit)
 
       // kcal/100g: bevorzugt energy-kcal_100g, sonst kcal aus kJ umrechnen
       const kcal = n["energy-kcal_100g"] ?? n["energy-kcal_value"] ?? n["energy-kcal"]
@@ -156,10 +218,21 @@ export default function App() {
   }
 
   async function hinzufuegen() {
-    if (!name || !menge) return
+    setFehler(null)
+    setInfo("")
+    const n = String(name || "").trim()
+    const m = toNumber(menge)
+    if (!n) {
+      setFehler("Bitte gib einen Namen ein.")
+      return
+    }
+    if (m === null || m <= 0) {
+      setFehler("Bitte gib eine gültige Menge ein (z.B. 450).")
+      return
+    }
     const payload = {
-      name,
-      menge,
+      name: n,
+      menge: m,
       einheit,
       ablaufdatum,
       kalorien_100g: toNumber(kalorien100g),
@@ -170,10 +243,11 @@ export default function App() {
       gesaettigte_fettsaeuren_100g: toNumber(gesaettigteFettsaeuren100g),
       ballaststoffe_100g: toNumber(ballaststoffe100g),
       salz_100g: toNumber(salz100g),
+      gegessen_am: null,
     }
 
     const { error } = await supabase.from("vorrat").insert([payload])
-    if (error) alert("Fehler: " + error.message)
+    if (error) setFehler("Fehler: " + error.message)
     else {
       setName("")
       setMenge("")
@@ -186,12 +260,39 @@ export default function App() {
       setGesaettigteFettsaeuren100g("")
       setBallaststoffe100g("")
       setSalz100g("")
+      setInfo("Gespeichert.")
       laden()
     }
   }
 
   async function loeschen(id) {
+    setFehler(null)
     await supabase.from("vorrat").delete().eq("id", id)
+    laden()
+  }
+
+  function todayIso() {
+    const d = new Date()
+    const yyyy = d.getFullYear()
+    const mm = String(d.getMonth() + 1).padStart(2, "0")
+    const dd = String(d.getDate()).padStart(2, "0")
+    return `${yyyy}-${mm}-${dd}`
+  }
+
+  async function markiereHeuteGegessen(item) {
+    setFehler(null)
+    setInfo("")
+    const iso = todayIso()
+    const { error } = await supabase
+      .from("vorrat")
+      .update({ gegessen_am: iso })
+      .eq("id", item.id)
+
+    if (error) {
+      setFehler("Fehler beim Markieren: " + error.message)
+      return
+    }
+    setInfo("Für heute eingetragen.")
     laden()
   }
 
@@ -220,6 +321,24 @@ export default function App() {
   function berechneGesamtwert({ pro100, menge }) {
     if (pro100 === null || menge === null) return null
     return Math.round((pro100 / 100) * menge)
+  }
+
+  function naehrwerteGesamt(item) {
+    const m = toNumber(item.menge)
+    if (m === null) return {}
+    if (item.einheit !== "g" && item.einheit !== "ml") return {}
+
+    const kcal100 = pickNumber(item, ["kalorien_100g", "kcal_100g", "kcal_pro_100g", "calories_100g"])
+    const protein100 = pickNumber(item, ["protein_100g", "eiweiss_100g", "eiweiß_100g"])
+    const carbs100 = pickNumber(item, ["kohlenhydrate_100g", "kh_100g", "carbs_100g"])
+    const fett100 = pickNumber(item, ["fett_100g", "fat_100g"])
+
+    const kcal = berechneGesamtwert({ pro100: kcal100, menge: m })
+    const protein = berechneGesamtwert({ pro100: protein100, menge: m })
+    const carbs = berechneGesamtwert({ pro100: carbs100, menge: m })
+    const fett = berechneGesamtwert({ pro100: fett100, menge: m })
+
+    return { kcal, protein, carbs, fett }
   }
 
   function naehrwerteZeile(item) {
@@ -268,55 +387,222 @@ export default function App() {
     return parts
   }
 
+  function clamp01(x) {
+    if (!Number.isFinite(x)) return 0
+    return Math.max(0, Math.min(1, x))
+  }
+
+  function Progress({ label, value, goal, unit }) {
+    const safeGoal = Number.isFinite(goal) && goal > 0 ? goal : null
+    const pct = safeGoal ? clamp01(value / goal) : 0
+    return (
+      <div style={{ marginBottom: 10 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+          <strong>{label}</strong>
+          {safeGoal ? (
+            <span>{Math.round(value)} / {Math.round(goal)} {unit}</span>
+          ) : (
+            <span>{Math.round(value)} {unit}</span>
+          )}
+        </div>
+        <div style={{ height: 10, background: "#eee", borderRadius: 999, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${Math.round(pct * 100)}%`, background: "#22c55e" }} />
+        </div>
+      </div>
+    )
+  }
+
+  function berechneTDEE(p) {
+    // Mifflin-St-Jeor (ohne Geschlecht-Feld in den Anforderungen)
+    // Wir verwenden hier eine neutrale Variante ohne +5/-161.
+    const w = toNumber(p.gewicht)
+    const h = toNumber(p.groesse)
+    const a = toNumber(p.alter)
+    const t = toNumber(p.trainingstage)
+    if (w === null || h === null || a === null || t === null) return null
+
+    const bmr = 10 * w + 6.25 * h - 5 * a
+    const days = Math.max(1, Math.min(7, Math.round(t)))
+    const factorByDays = {
+      1: 1.375,
+      2: 1.45,
+      3: 1.55,
+      4: 1.6,
+      5: 1.7,
+      6: 1.725,
+      7: 1.725,
+    }
+    const factor = factorByDays[days] || 1.55
+    return Math.round(bmr * factor)
+  }
+
+  function proteinZielGramm(p) {
+    const w = toNumber(p.gewicht)
+    if (w === null) return null
+    const z = String(p.ziel || "")
+    const mult =
+      z === "Fettabbau" ? 1.8 :
+      z === "Muskelerhalt" ? 1.6 :
+      2.0 // Muskelaufbau
+    return Math.round(w * mult)
+  }
+
+  const heute = todayIso()
+  const gegessenHeute = vorrat.filter((x) => String(x.gegessen_am || "") === heute)
+  const totalsHeute = gegessenHeute.reduce(
+    (acc, item) => {
+      const t = naehrwerteGesamt(item)
+      if (t.kcal !== null && t.kcal !== undefined) acc.kcal += t.kcal
+      if (t.protein !== null && t.protein !== undefined) acc.protein += t.protein
+      if (t.carbs !== null && t.carbs !== undefined) acc.carbs += t.carbs
+      if (t.fett !== null && t.fett !== undefined) acc.fett += t.fett
+      return acc
+    },
+    { kcal: 0, protein: 0, carbs: 0, fett: 0 },
+  )
+
+  const tdee = berechneTDEE(profil)
+  const proteinGoal = proteinZielGramm(profil)
+
   return (
     <div style={{ maxWidth: 600, margin: "40px auto", padding: "0 20px", fontFamily: "sans-serif" }}>
-      <h1>NutriTrack — Vorrat</h1>
-      {fehler && <div style={{ background: "#ffe5e5", padding: 12, borderRadius: 8, marginBottom: 16, color: "red" }}>Fehler: {fehler}</div>}
-      <div style={{ marginBottom: 24, display: "flex", flexDirection: "column", gap: 8 }}>
-        <button onClick={() => setScanOffen(true)} style={{ padding: 10, borderRadius: 6, background: "#2563eb", color: "white", border: "none", cursor: "pointer", fontWeight: "bold" }}>
-          Barcode scannen
-        </button>
-        <input placeholder="Name (z.B. Hähnchen)" value={name} onChange={e => setName(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
-        <input placeholder="Menge (z.B. 500)" value={menge} onChange={e => setMenge(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
-        <select value={einheit} onChange={e => setEinheit(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }}>
-          <option value="g">g</option>
-          <option value="ml">ml</option>
-          <option value="stk">stk</option>
-        </select>
-        <input type="date" value={ablaufdatum} onChange={e => setAblaufdatum(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
-
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          <input placeholder="Kalorien / 100g (kcal)" value={kalorien100g} onChange={e => setKalorien100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
-          <input placeholder="Protein / 100g (g)" value={protein100g} onChange={e => setProtein100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
-          <input placeholder="Kohlenhydrate / 100g (g)" value={kohlenhydrate100g} onChange={e => setKohlenhydrate100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
-          <input placeholder="Zucker / 100g (g)" value={zucker100g} onChange={e => setZucker100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
-          <input placeholder="Fett / 100g (g)" value={fett100g} onChange={e => setFett100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
-          <input placeholder="Ges. Fettsäuren / 100g (g)" value={gesaettigteFettsaeuren100g} onChange={e => setGesaettigteFettsaeuren100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
-          <input placeholder="Ballaststoffe / 100g (g)" value={ballaststoffe100g} onChange={e => setBallaststoffe100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
-          <input placeholder="Salz / 100g (g)" value={salz100g} onChange={e => setSalz100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 14 }}>
+        <h1 style={{ margin: 0 }}>NutriTrack</h1>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => setSeite("vorrat")} style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid #ddd", background: seite === "vorrat" ? "#111827" : "white", color: seite === "vorrat" ? "white" : "black", cursor: "pointer" }}>
+            Vorrat
+          </button>
+          <button onClick={() => setSeite("profil")} style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid #ddd", background: seite === "profil" ? "#111827" : "white", color: seite === "profil" ? "white" : "black", cursor: "pointer" }}>
+            Profil
+          </button>
         </div>
-
-        <button onClick={hinzufuegen} style={{ padding: 10, borderRadius: 6, background: "#22c55e", color: "white", border: "none", cursor: "pointer", fontWeight: "bold" }}>Hinzufügen</button>
       </div>
-      {vorrat.length === 0 && !fehler && <p style={{ color: "#aaa" }}>Noch keine Lebensmittel im Vorrat.</p>}
-      {vorrat.map(item => (
-        <div key={item.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", marginBottom: 8, borderRadius: 8, border: "1px solid #ddd", background: istBaldAbgelaufen(item.ablaufdatum) ? "#ffe5e5" : "#f9f9f9" }}>
-          <div>
-            <strong>{item.name}</strong> — {item.menge} {item.einheit}
-            {item.ablaufdatum && <span style={{ marginLeft: 8, fontSize: 12, color: "#888" }}>läuft ab: {item.ablaufdatum}</span>}
-            {(() => {
-              const parts = naehrwerteZeile(item)
-              if (parts.length === 0) return null
-              return (
-                <div style={{ marginTop: 4, fontSize: 13, color: "#333" }}>
-                  {parts.join(" · ")}
-                </div>
-              )
-            })()}
-          </div>
-          <button onClick={() => loeschen(item.id)} style={{ color: "red", border: "none", background: "none", cursor: "pointer", fontSize: 16 }}>Löschen</button>
+
+      {/* Tagesübersicht */}
+      <div style={{ border: "1px solid #ddd", borderRadius: 10, padding: 12, marginBottom: 16, background: "#fafafa" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+          <strong>Tagesübersicht (heute)</strong>
+          <span style={{ fontSize: 12, color: "#666" }}>{heute}</span>
         </div>
-      ))}
+        <Progress label="Kalorien" value={totalsHeute.kcal} goal={tdee ?? 2800} unit="kcal" />
+        <Progress label="Protein" value={totalsHeute.protein} goal={proteinGoal ?? 180} unit="g" />
+        <Progress label="Kohlenhydrate" value={totalsHeute.carbs} goal={null} unit="g" />
+        <Progress label="Fett" value={totalsHeute.fett} goal={null} unit="g" />
+        <div style={{ fontSize: 12, color: "#666" }}>
+          Berechnung basiert auf Einträgen, die du als „heute gegessen“ markierst.
+        </div>
+      </div>
+
+      {fehler && <div style={{ background: "#ffe5e5", padding: 12, borderRadius: 8, marginBottom: 12, color: "red" }}>Fehler: {fehler}</div>}
+      {info && <div style={{ background: "#eaffea", padding: 12, borderRadius: 8, marginBottom: 12, color: "#14532d" }}>{info}</div>}
+
+      {seite === "vorrat" ? (
+        <>
+          <h2 style={{ margin: "10px 0" }}>Vorrat</h2>
+
+          <div style={{ marginBottom: 18, display: "flex", flexDirection: "column", gap: 8 }}>
+            <button onClick={() => setScanOffen(true)} style={{ padding: 10, borderRadius: 6, background: "#2563eb", color: "white", border: "none", cursor: "pointer", fontWeight: "bold" }}>
+              Barcode scannen
+            </button>
+            <input placeholder="Name (z.B. Hähnchen)" value={name} onChange={e => setName(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+            <input placeholder="Menge (z.B. 500)" value={menge} onChange={e => setMenge(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+            <select value={einheit} onChange={e => setEinheit(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }}>
+              <option value="g">g</option>
+              <option value="ml">ml</option>
+              <option value="stk">stk</option>
+            </select>
+            <input type="date" value={ablaufdatum} onChange={e => setAblaufdatum(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <input placeholder="Kalorien / 100g (kcal)" value={kalorien100g} onChange={e => setKalorien100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+              <input placeholder="Protein / 100g (g)" value={protein100g} onChange={e => setProtein100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+              <input placeholder="Kohlenhydrate / 100g (g)" value={kohlenhydrate100g} onChange={e => setKohlenhydrate100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+              <input placeholder="Zucker / 100g (g)" value={zucker100g} onChange={e => setZucker100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+              <input placeholder="Fett / 100g (g)" value={fett100g} onChange={e => setFett100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+              <input placeholder="Ges. Fettsäuren / 100g (g)" value={gesaettigteFettsaeuren100g} onChange={e => setGesaettigteFettsaeuren100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+              <input placeholder="Ballaststoffe / 100g (g)" value={ballaststoffe100g} onChange={e => setBallaststoffe100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+              <input placeholder="Salz / 100g (g)" value={salz100g} onChange={e => setSalz100g(e.target.value)} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+            </div>
+
+            <button onClick={hinzufuegen} style={{ padding: 10, borderRadius: 6, background: "#22c55e", color: "white", border: "none", cursor: "pointer", fontWeight: "bold" }}>
+              Hinzufügen
+            </button>
+          </div>
+
+          {vorrat.length === 0 && !fehler && <p style={{ color: "#aaa" }}>Noch keine Lebensmittel im Vorrat.</p>}
+          {vorrat.map(item => (
+            <div key={item.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, padding: "10px 14px", marginBottom: 8, borderRadius: 8, border: "1px solid #ddd", background: istBaldAbgelaufen(item.ablaufdatum) ? "#ffe5e5" : "#f9f9f9" }}>
+              <div style={{ flex: 1 }}>
+                <strong>{item.name}</strong> — {item.menge} {item.einheit}
+                {item.ablaufdatum && <span style={{ marginLeft: 8, fontSize: 12, color: "#888" }}>läuft ab: {item.ablaufdatum}</span>}
+                {(() => {
+                  const parts = naehrwerteZeile(item)
+                  if (parts.length === 0) return null
+                  return (
+                    <div style={{ marginTop: 4, fontSize: 13, color: "#333" }}>
+                      {parts.join(" · ")}
+                    </div>
+                  )
+                })()}
+                {String(item.gegessen_am || "") === heute ? (
+                  <div style={{ marginTop: 6, fontSize: 12, color: "#14532d" }}>
+                    Heute gegessen
+                  </div>
+                ) : null}
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
+                <button onClick={() => markiereHeuteGegessen(item)} style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid #ddd", background: "#fff", cursor: "pointer", fontSize: 12 }}>
+                  Heute gegessen
+                </button>
+                <button onClick={() => loeschen(item.id)} style={{ color: "red", border: "none", background: "none", cursor: "pointer", fontSize: 16 }}>
+                  Löschen
+                </button>
+              </div>
+            </div>
+          ))}
+        </>
+      ) : (
+        <>
+          <h2 style={{ margin: "10px 0" }}>Profil</h2>
+          <div style={{ border: "1px solid #ddd", borderRadius: 10, padding: 12, background: "#fafafa" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <input placeholder="Name" value={profil.name} onChange={(e) => setProfil((p) => ({ ...p, name: e.target.value }))} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+              <input placeholder="Gewicht (kg)" value={profil.gewicht} onChange={(e) => setProfil((p) => ({ ...p, gewicht: e.target.value }))} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+              <input placeholder="Größe (cm)" value={profil.groesse} onChange={(e) => setProfil((p) => ({ ...p, groesse: e.target.value }))} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+              <input placeholder="Alter" value={profil.alter} onChange={(e) => setProfil((p) => ({ ...p, alter: e.target.value }))} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
+
+              <select value={profil.ziel} onChange={(e) => setProfil((p) => ({ ...p, ziel: e.target.value }))} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }}>
+                <option>Muskelaufbau</option>
+                <option>Fettabbau</option>
+                <option>Muskelerhalt</option>
+              </select>
+
+              <select value={profil.trainingstage} onChange={(e) => setProfil((p) => ({ ...p, trainingstage: e.target.value }))} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }}>
+                {Array.from({ length: 7 }, (_, i) => String(i + 1)).map((v) => (
+                  <option key={v} value={v}>{v} Trainingstage pro Woche</option>
+                ))}
+              </select>
+
+              <textarea
+                placeholder="Lebensmittel die ich nicht mag"
+                value={profil.dislikes}
+                onChange={(e) => setProfil((p) => ({ ...p, dislikes: e.target.value }))}
+                rows={3}
+                style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd", resize: "vertical" }}
+              />
+
+              <div style={{ marginTop: 6, fontSize: 13 }}>
+                <strong>TDEE (geschätzt): </strong>
+                {tdee ? `${tdee} kcal/Tag` : "Bitte Gewicht, Größe, Alter und Trainingstage ausfüllen."}
+              </div>
+              <div style={{ marginTop: 4, fontSize: 12, color: "#666" }}>
+                Hinweis: Mifflin‑St‑Jeor wird hier ohne Geschlechts-Konstante berechnet (neutral), da kein Geschlecht abgefragt wird.
+              </div>
+            </div>
+          </div>
+        </>
+      )}
 
       {scanOffen && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
