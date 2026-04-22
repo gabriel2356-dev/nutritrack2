@@ -142,7 +142,7 @@ export default function App() {
         groesse: data.groesse_cm ?? "",
         alter: data.alter_jahre ?? "",
         ziel: data.ziel ?? "Muskelaufbau",
-        trainingstage: data.trainingstage ?? "3",
+        trainingstage: String(data.trainingstage ?? "3"),
         dislikes: data.ausschluss_zutaten || "",
         tdee_kcal: data.tdee_kcal ?? null,
         ziel_protein_g: data.ziel_protein_g ?? null,
@@ -486,13 +486,16 @@ export default function App() {
       const computedTdee = berechneTDEE(profil)
       const computedProtein = proteinZielGramm(profil)
 
+      const tsRaw = Number(profil.trainingstage)
+      const ts = Number.isFinite(tsRaw) ? Math.min(7, Math.max(1, Math.round(tsRaw))) : null
+
       const payload = {
         name: String(profil.name || "").trim() || null,
         gewicht_kg: toNumber(profil.gewicht),
         groesse_cm: toNumber(profil.groesse),
         alter_jahre: toNumber(profil.alter),
         ziel: profil.ziel,
-        trainingstage: toNumber(profil.trainingstage),
+        trainingstage: ts,
         ausschluss_zutaten: profil.dislikes,
         tdee_kcal: computedTdee,
         ziel_protein_g: computedProtein,
