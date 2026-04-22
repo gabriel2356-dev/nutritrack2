@@ -485,7 +485,7 @@ export default function App() {
       .split(",")
       .map((s) => s.trim())
       .filter((s) => s.length > 0)
-    return arr.length > 0 ? arr : null
+    return arr
   }
 
   async function speichereProfil() {
