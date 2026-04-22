@@ -27,38 +27,25 @@ export default function App() {
   const scannerRef = useRef(null)
   const scannerIdRef = useRef(null)
 
-  const [profil, setProfil] = useState(() => {
-    try {
-      const raw = localStorage.getItem("nutritrack_profil")
-      return raw ? JSON.parse(raw) : {
-        name: "",
-        gewicht: "",
-        groesse: "",
-        alter: "",
-        ziel: "Muskelaufbau",
-        trainingstage: "3",
-        dislikes: "",
-      }
-    } catch {
-      return {
-        name: "",
-        gewicht: "",
-        groesse: "",
-        alter: "",
-        ziel: "Muskelaufbau",
-        trainingstage: "3",
-        dislikes: "",
-      }
-    }
+  const [profilId, setProfilId] = useState(null)
+  const [profilLoading, setProfilLoading] = useState(true)
+  const [profilSaving, setProfilSaving] = useState(false)
+  const [profil, setProfil] = useState({
+    name: "",
+    gewicht: "",
+    groesse: "",
+    alter: "",
+    ziel: "Muskelaufbau",
+    trainingstage: "3",
+    dislikes: "",
+    tdee_kcal: null,
+    ziel_protein_g: null,
   })
 
-  useEffect(() => { laden() }, [])
-
   useEffect(() => {
-    try {
-      localStorage.setItem("nutritrack_profil", JSON.stringify(profil))
-    } catch {}
-  }, [profil])
+    laden()
+    ladeProfil()
+  }, [])
 
   useEffect(() => {
     if (!scanOffen) return
@@ -122,6 +109,49 @@ export default function App() {
       .order("ablaufdatum", { ascending: true })
     if (error) setFehler(error.message)
     else setVorrat(data || [])
+  }
+
+  async function ladeProfil() {
+    setProfilLoading(true)
+    setFehler(null)
+    try {
+      // Ohne Auth nehmen wir das erste Profil (Single-User-Setup)
+      const { data, error } = await supabase
+        .from("users_profile")
+        .select("*")
+        .limit(1)
+        .maybeSingle()
+
+      if (error) {
+        setFehler("Profil konnte nicht geladen werden: " + error.message)
+        setProfilLoading(false)
+        return
+      }
+
+      if (!data) {
+        setProfilId(null)
+        setProfilLoading(false)
+        return
+      }
+
+      setProfilId(data.id ?? null)
+      setProfil((p) => ({
+        ...p,
+        name: data.name ?? "",
+        gewicht: data.gewicht_kg ?? "",
+        groesse: data.groesse_cm ?? "",
+        alter: data.alter_jahre ?? "",
+        ziel: data.ziel ?? "Muskelaufbau",
+        trainingstage: data.trainingstage ?? "3",
+        dislikes: data.ausschluss_zutaten ?? "",
+        tdee_kcal: data.tdee_kcal ?? null,
+        ziel_protein_g: data.ziel_protein_g ?? null,
+      }))
+      setProfilLoading(false)
+    } catch (e) {
+      setFehler("Profil konnte nicht geladen werden: " + (e?.message || String(e)))
+      setProfilLoading(false)
+    }
   }
 
   async function stopScanner() {
@@ -447,6 +477,68 @@ export default function App() {
     return Math.round(w * mult)
   }
 
+  async function speichereProfil() {
+    setFehler(null)
+    setInfo("")
+    setProfilSaving(true)
+
+    try {
+      const computedTdee = berechneTDEE(profil)
+      const computedProtein = proteinZielGramm(profil)
+
+      const payload = {
+        name: String(profil.name || "").trim() || null,
+        gewicht_kg: toNumber(profil.gewicht),
+        groesse_cm: toNumber(profil.groesse),
+        alter_jahre: toNumber(profil.alter),
+        ziel: profil.ziel,
+        trainingstage: toNumber(profil.trainingstage),
+        ausschluss_zutaten: String(profil.dislikes || "").trim() || null,
+        tdee_kcal: computedTdee,
+        ziel_protein_g: computedProtein,
+      }
+
+      // Wir versuchen zuerst "update", falls wir eine id haben.
+      if (profilId !== null && profilId !== undefined) {
+        const { error } = await supabase
+          .from("users_profile")
+          .update(payload)
+          .eq("id", profilId)
+
+        if (error) {
+          setFehler("Profil konnte nicht gespeichert werden: " + error.message)
+          setProfilSaving(false)
+          return
+        }
+      } else {
+        const { data, error } = await supabase
+          .from("users_profile")
+          .insert([payload])
+          .select("*")
+          .limit(1)
+          .maybeSingle()
+
+        if (error) {
+          setFehler("Profil konnte nicht gespeichert werden: " + error.message)
+          setProfilSaving(false)
+          return
+        }
+        setProfilId(data?.id ?? null)
+      }
+
+      setProfil((p) => ({
+        ...p,
+        tdee_kcal: computedTdee,
+        ziel_protein_g: computedProtein,
+      }))
+      setInfo("Profil gespeichert.")
+      setProfilSaving(false)
+    } catch (e) {
+      setFehler("Profil konnte nicht gespeichert werden: " + (e?.message || String(e)))
+      setProfilSaving(false)
+    }
+  }
+
   const heute = todayIso()
   const gegessenHeute = vorrat.filter((x) => String(x.gegessen_am || "") === heute)
   const totalsHeute = gegessenHeute.reduce(
@@ -461,8 +553,10 @@ export default function App() {
     { kcal: 0, protein: 0, carbs: 0, fett: 0 },
   )
 
-  const tdee = berechneTDEE(profil)
-  const proteinGoal = proteinZielGramm(profil)
+  const computedTdee = berechneTDEE(profil)
+  const computedProteinGoal = proteinZielGramm(profil)
+  const tdee = toNumber(profil.tdee_kcal) ?? computedTdee
+  const proteinGoal = toNumber(profil.ziel_protein_g) ?? computedProteinGoal
 
   return (
     <div style={{ maxWidth: 600, margin: "40px auto", padding: "0 20px", fontFamily: "sans-serif" }}>
@@ -567,6 +661,9 @@ export default function App() {
           <h2 style={{ margin: "10px 0" }}>Profil</h2>
           <div style={{ border: "1px solid #ddd", borderRadius: 10, padding: 12, background: "#fafafa" }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {profilLoading ? (
+                <div style={{ fontSize: 13, color: "#666" }}>Profil wird geladen…</div>
+              ) : null}
               <input placeholder="Name" value={profil.name} onChange={(e) => setProfil((p) => ({ ...p, name: e.target.value }))} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
               <input placeholder="Gewicht (kg)" value={profil.gewicht} onChange={(e) => setProfil((p) => ({ ...p, gewicht: e.target.value }))} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
               <input placeholder="Größe (cm)" value={profil.groesse} onChange={(e) => setProfil((p) => ({ ...p, groesse: e.target.value }))} style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }} />
@@ -592,12 +689,20 @@ export default function App() {
                 style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd", resize: "vertical" }}
               />
 
+              <button
+                onClick={speichereProfil}
+                disabled={profilSaving}
+                style={{ padding: 10, borderRadius: 6, background: "#111827", color: "white", border: "none", cursor: "pointer", fontWeight: "bold" }}
+              >
+                {profilSaving ? "Speichern…" : "Profil speichern"}
+              </button>
+
               <div style={{ marginTop: 6, fontSize: 13 }}>
                 <strong>TDEE (geschätzt): </strong>
                 {tdee ? `${tdee} kcal/Tag` : "Bitte Gewicht, Größe, Alter und Trainingstage ausfüllen."}
               </div>
               <div style={{ marginTop: 4, fontSize: 12, color: "#666" }}>
-                Hinweis: Mifflin‑St‑Jeor wird hier ohne Geschlechts-Konstante berechnet (neutral), da kein Geschlecht abgefragt wird.
+                Wird beim Speichern automatisch berechnet und im Profil abgelegt.
               </div>
             </div>
           </div>
