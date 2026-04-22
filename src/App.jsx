@@ -143,7 +143,9 @@ export default function App() {
         alter: data.alter_jahre ?? "",
         ziel: data.ziel ?? "Muskelaufbau",
         trainingstage: data.trainingstage ?? "3",
-        dislikes: data.ausschluss_zutaten ?? "",
+        dislikes: Array.isArray(data.ausschluss_zutaten)
+          ? data.ausschluss_zutaten.filter(Boolean).join(", ")
+          : (data.ausschluss_zutaten ?? ""),
         tdee_kcal: data.tdee_kcal ?? null,
         ziel_protein_g: data.ziel_protein_g ?? null,
       }))
@@ -477,6 +479,15 @@ export default function App() {
     return Math.round(w * mult)
   }
 
+  function parseAusschlussZutaten(text) {
+    const raw = String(text || "")
+    const arr = raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+    return arr.length > 0 ? arr : null
+  }
+
   async function speichereProfil() {
     setFehler(null)
     setInfo("")
@@ -493,7 +504,7 @@ export default function App() {
         alter_jahre: toNumber(profil.alter),
         ziel: profil.ziel,
         trainingstage: toNumber(profil.trainingstage),
-        ausschluss_zutaten: String(profil.dislikes || "").trim() || null,
+        ausschluss_zutaten: parseAusschlussZutaten(profil.dislikes),
         tdee_kcal: computedTdee,
         ziel_protein_g: computedProtein,
       }
