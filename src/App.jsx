@@ -143,26 +143,7 @@ export default function App() {
         alter: data.alter_jahre ?? "",
         ziel: data.ziel ?? "Muskelaufbau",
         trainingstage: data.trainingstage ?? "3",
-        dislikes: (() => {
-          if (Array.isArray(data.ausschluss_zutaten)) return data.ausschluss_zutaten.join(", ")
-          const raw = String(data.ausschluss_zutaten || "").trim()
-          if (!raw) return ""
-          // Falls früher versehentlich JSON-String gespeichert wurde:
-          if (raw.startsWith("[")) {
-            try {
-              return (JSON.parse(raw) || []).join(", ")
-            } catch {
-              return raw
-            }
-          }
-          // Falls als Postgres Array Literal "{a,b}" kommt:
-          if (raw.startsWith("{") && raw.endsWith("}")) {
-            const inside = raw.slice(1, -1).trim()
-            if (!inside) return ""
-            return inside.split(",").map((s) => s.trim().replace(/^"|"$/g, "")).join(", ")
-          }
-          return raw
-        })(),
+        dislikes: data.ausschluss_zutaten || "",
         tdee_kcal: data.tdee_kcal ?? null,
         ziel_protein_g: data.ziel_protein_g ?? null,
       }))
@@ -496,13 +477,6 @@ export default function App() {
     return Math.round(w * mult)
   }
 
-  function parseAusschlussZutaten(text) {
-    return String(text || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0)
-  }
-
   async function speichereProfil() {
     setFehler(null)
     setInfo("")
@@ -519,7 +493,7 @@ export default function App() {
         alter_jahre: toNumber(profil.alter),
         ziel: profil.ziel,
         trainingstage: toNumber(profil.trainingstage),
-        ausschluss_zutaten: parseAusschlussZutaten(profil.dislikes),
+        ausschluss_zutaten: profil.dislikes,
         tdee_kcal: computedTdee,
         ziel_protein_g: computedProtein,
       }
